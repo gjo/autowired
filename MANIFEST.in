@@ -1,8 +1,5 @@
 include CHANGES.rst
 include Pipfile
-include Pipfile.lock
-include constraints.txt
 include pyproject.toml
-include tasks.py
 include tests/*.py
 include tox.ini
