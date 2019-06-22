@@ -16,8 +16,12 @@ class IBaz(Interface):
 
 
 class Baz(LazyAutowireService):
+
     foo = AutowireTo(IFoo)
     bar = AutowireTo(IBar)
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
 
 
 def test():

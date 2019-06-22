@@ -14,7 +14,7 @@ class DoesNotDefinedPropertyName(AttributeError, AutowireError):
     pass
 
 
-class IsNotLazyAutowireService(AttributeError, AutowireError):
+class DoesNotSupportLazyAutowire(AttributeError, AutowireError):
     pass
 
 
@@ -58,9 +58,9 @@ class AutowireTo:
 
         if not self.property_name:
             raise DoesNotDefinedPropertyName
-        # NOTE: isinstance(obj, LazyWiredService)
+        # NOTE: isinstance(obj, LazyAutowireService)
         if not hasattr(obj, "wired_container"):
-            raise IsNotLazyAutowireService
+            raise DoesNotSupportLazyAutowire
 
         service = self.find_service(obj.wired_container, obj.__dict__)
         setattr(obj, self.property_name, service)
@@ -83,20 +83,13 @@ class AutowireTo:
 
 class LazyAutowireServiceMeta(type):
     def __init__(cls, name, bases, namespace):
+        cls.__support_lazy_autowire__ = True
         for k, v in namespace.items():
             if isinstance(v, AutowireTo):
                 v.property_name = k
-        cls.wired_container = None
 
 
-class LazyAutowireService(metaclass=LazyAutowireServiceMeta):
-    """
-    A service class that contains `Autowired` property that is lazy loaded.
-
-    TODO: py36
-    :type wired_container: Optional[ServiceRegistry]
-    """
-
+class LazyAutowireServiceBase:
     def __init__(
         self,
         *,
@@ -108,11 +101,22 @@ class LazyAutowireService(metaclass=LazyAutowireServiceMeta):
             setattr(self, k, v)
 
 
+class LazyAutowireService(
+    LazyAutowireServiceBase, metaclass=LazyAutowireServiceMeta
+):
+    """
+    A service class that contains `Autowired` property that is lazy loaded.
+
+    TODO: py36
+    :type wired_container: Optional[ServiceRegistry]
+    """
+
+
 def factory_factory(
     cls: Type, namespace: Optional[Dict[Text, Any]] = None
 ) -> Callable[[ServiceContainer], Any]:
     # NOTE: issubclass(cls, LazyAutowireService)
-    is_lazy_cls = hasattr(cls, "wired_container")
+    is_lazy_cls = getattr(cls, "__support_lazy_autowire__", False)
     if is_lazy_cls:
         preloads = {}  # type: Dict[Text, Any]
     else:

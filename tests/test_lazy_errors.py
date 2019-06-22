@@ -2,7 +2,7 @@ import pytest
 from autowired import (
     AutowireTo,
     DoesNotDefinedPropertyName,
-    IsNotLazyAutowireService,
+    DoesNotSupportLazyAutowire,
 )
 
 
@@ -12,8 +12,8 @@ def test_does_not_defined_property_name():
         aw.__get__(object())
 
 
-def test_is_not_lazy_autowire_service():
+def test_does_not_support_lazy_autowire():
     aw = AutowireTo()
     aw.property_name = "TEST"
-    with pytest.raises(IsNotLazyAutowireService):
+    with pytest.raises(DoesNotSupportLazyAutowire):
         aw.__get__(object())

@@ -30,4 +30,5 @@ def test():
 
     container = registry.create_container()
     bar = container.get(IBar)
+    assert "wired_container" not in bar.__dict__
     assert foo is bar.foo
