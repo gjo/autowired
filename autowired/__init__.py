@@ -1,137 +1,212 @@
 from types import MethodType
-from typing import Any, Callable, Dict, Optional, Text, Type, Union
+from typing import (
+    Any,
+    Callable,
+    Iterable,
+    Mapping,
+    Optional,
+    Text,
+    Type,
+    TypeVar,
+    Union,
+)
 from wired import ServiceContainer, ServiceRegistry
 from zope.interface import Interface
 
 __version__ = "0.1.dev0"
 
 
+T = TypeVar("T")
+
+
 class AutowireError(Exception):
     pass
 
 
-class DoesNotDefinedPropertyName(AttributeError, AutowireError):
+class DoesNotWired(AutowireError, AttributeError):
     pass
 
 
-class DoesNotSupportLazyAutowire(AttributeError, AutowireError):
+class DoesNotSupportLazy(AutowireError, ValueError):
     pass
 
 
-class FromProperty:
-    """
-    A marker for `context` and `name` that is `Autowired`'s arguments.
-    """
+class DataSource:
+    pass
 
+
+class FromProperty(DataSource):
     __slots__ = ["name"]
 
-    def __init__(self, name: Text):
+    def __init__(self, name: Text) -> None:
         self.name = name
 
 
-class AutowireTo:
-    """
-    A property descriptor for wired service.
+class FromNamespace(DataSource):
+    __slots__ = ["name"]
 
-    TODO: py36
-    :type interface: Type[Interface]
-    :type context: Optional[FromProperty]
-    :type name: Optional[Union[Text, FromProperty]]
-    :type property_name: Optional[Text]
-    """
+    def __init__(self, name: Text) -> None:
+        self.name = name
+
+
+FROM_SELF = DataSource()
+
+
+class Autowire:
+    __slots__ = ["iface_or_type", "context", "name"]
 
     def __init__(
         self,
-        iface: Type[Interface] = Interface,
+        iface_or_type: Type[Any] = Interface,
         *,
-        context: Optional[FromProperty] = None,
-        name: Optional[Union[Text, FromProperty]] = None
+        context: Optional[DataSource] = None,
+        name: Optional[Union[Text, DataSource]] = None
     ) -> None:
-        self.interface = iface
+        self.iface_or_type = iface_or_type
         self.context = context
         self.name = name
-        self.property_name = None
 
-    def __get__(self, obj, obj_type=None):
+    def raise_if_using_lazy(self) -> None:
+        if (
+            isinstance(self.context, FromProperty)
+            or isinstance(self.name, FromProperty)
+            or self.context is FROM_SELF
+            or self.name is FROM_SELF
+        ):
+            raise DoesNotSupportLazy
+
+    def resolved(
+        self,
+        container: ServiceContainer,
+        obj: Any = None,
+        namespace: Optional[Mapping[Text, Any]] = None,
+    ) -> Any:
+        params = {}
+        if self.context:
+            if self.context is FROM_SELF:
+                assert obj
+                params["context"] = obj
+            elif isinstance(self.context, FromNamespace):
+                assert namespace
+                params["context"] = namespace[self.context.name]
+            elif isinstance(self.context, FromProperty):
+                assert obj
+                params["context"] = getattr(obj, self.context.name)
+        if self.name:
+            if isinstance(self.name, FromNamespace):
+                assert namespace
+                params["name"] = namespace[self.name.name]
+            elif isinstance(self.name, FromProperty):
+                assert obj
+                params["name"] = getattr(obj, self.name.name)
+            else:
+                params["name"] = self.name
+        return container.get(self.iface_or_type, **params)
+
+
+class AutowireField(Autowire):
+    """
+    A property descriptor for wired service.
+    """
+
+    __slots__ = Autowire.__slots__.copy()
+
+    def __get__(self, obj: Any, type: Optional[type] = None) -> Any:
         if obj is None:
             return self
 
-        if not self.property_name:
-            raise DoesNotDefinedPropertyName
-        # NOTE: isinstance(obj, LazyAutowireService)
-        if not hasattr(obj, "wired_container"):
-            raise DoesNotSupportLazyAutowire
-
-        service = self.find_service(obj.wired_container, obj.__dict__)
-        setattr(obj, self.property_name, service)
-        return service
-
-    def find_service(
-        self, container: ServiceContainer, namespace: Dict[Text, Any]
-    ) -> Any:
-        kwargs = {}  # type: Dict[Text, Any]
-        if self.context:
-            kwargs["context"] = namespace[self.context.name]
-        if self.name:
-            if isinstance(self.name, FromProperty):
-                kwargs["name"] = namespace[self.name.name]
-            else:
-                kwargs["name"] = self.name
-        service = container.get(self.interface, **kwargs)
+        if not hasattr(obj, "_autowire_field_lazy_loader"):
+            raise DoesNotWired
+        lazy_loader = (
+            obj._autowire_field_lazy_loader
+        )  # type: AutowireFieldLazyLoader
+        property_name = lazy_loader.property_map[self]
+        service = self.resolved(
+            lazy_loader.container, obj, lazy_loader.namespace
+        )
+        setattr(obj, property_name, service)
         return service
 
 
-class LazyAutowireServiceMeta(type):
-    def __init__(cls, name, bases, namespace):
-        cls.__support_lazy_autowire__ = True
-        for k, v in namespace.items():
-            if isinstance(v, AutowireTo):
-                v.property_name = k
+class AutowireFieldLazyLoader:
+    __slots__ = ["container", "namespace", "property_map"]
 
-
-class LazyAutowireServiceBase:
     def __init__(
         self,
-        *,
-        wired_container: Optional[ServiceRegistry] = None,
-        **kwargs: Any
+        container: ServiceContainer,
+        namespace: Mapping[Text, Any],
+        property_map: Mapping[AutowireField, Text],
     ) -> None:
-        self.wired_container = wired_container
-        for k, v in kwargs.items():
-            setattr(self, k, v)
+        self.container = container
+        self.namespace = namespace
+        self.property_map = property_map
 
 
-class LazyAutowireService(
-    LazyAutowireServiceBase, metaclass=LazyAutowireServiceMeta
-):
-    """
-    A service class that contains `Autowired` property that is lazy loaded.
+class AutowireInit:
+    __slots__ = ["kwargs"]
 
-    TODO: py36
-    :type wired_container: Optional[ServiceRegistry]
-    """
+    def __init__(self, **kwargs: Autowire) -> None:
+        self.kwargs = kwargs
+
+    def __call__(self, func: T) -> T:
+        setattr(func, "_autowire_init", self)
+        return func
+
+    def raise_if_using_lazy(self) -> None:
+        for k, a in self.kwargs.items():
+            a.raise_if_using_lazy()
+
+    def resolved(
+        self, container: ServiceContainer, namespace: Mapping[Text, Any]
+    ) -> Mapping[Text, Any]:
+        return {
+            k: a.resolved(container, None, namespace)
+            for k, a in self.kwargs.items()
+        }
 
 
 def factory_factory(
-    cls: Type, namespace: Optional[Dict[Text, Any]] = None
+    cls: Type[Any],
+    cls_args: Optional[Iterable[Any]] = None,
+    cls_kwargs: Optional[Mapping[Text, Any]] = None,
+    namespace: Optional[Mapping[Text, Any]] = None,
+    lazy: bool = False,
 ) -> Callable[[ServiceContainer], Any]:
-    # NOTE: issubclass(cls, LazyAutowireService)
-    is_lazy_cls = getattr(cls, "__support_lazy_autowire__", False)
-    if is_lazy_cls:
-        preloads = {}  # type: Dict[Text, Any]
-    else:
-        preloads = {
-            k: v for k, v in cls.__dict__.items() if isinstance(v, AutowireTo)
-        }
+    _namespace = namespace if namespace else {}
+    property_map = {
+        v: k for k, v in cls.__dict__.items() if isinstance(v, AutowireField)
+    }
+    if not lazy:
+        for af, _ in property_map.items():
+            af.raise_if_using_lazy()
+
+    ai = getattr(
+        cls.__init__, "_autowire_init", None
+    )  # type: Optional[AutowireInit]
+    if ai:
+        ai.raise_if_using_lazy()
 
     def factory(container: ServiceContainer) -> Any:
-        kwargs = namespace.copy() if namespace else {}
-        if is_lazy_cls:
-            kwargs["wired_container"] = container
+        _cls_kwargs = dict(cls_kwargs) if cls_kwargs else {}
+        if ai:
+            _cls_kwargs.update(ai.resolved(container, _namespace))
+        if cls_args:
+            if _cls_kwargs:
+                svc = cls(*cls_args, **_cls_kwargs)
+            else:
+                svc = cls(*cls_args)
         else:
-            for k, v in preloads.items():
-                kwargs[k] = v.find_service(container, namespace=kwargs)
-        svc = cls(**kwargs)
+            if _cls_kwargs:
+                svc = cls(**_cls_kwargs)
+            else:
+                svc = cls()
+        if lazy:
+            svc._autowire_field_lazy_loader = AutowireFieldLazyLoader(
+                container, _namespace, property_map
+            )
+        else:
+            for af, pn in property_map.items():
+                setattr(svc, pn, af.resolved(container, svc, _namespace))
         return svc
 
     return factory
@@ -139,14 +214,17 @@ def factory_factory(
 
 def register_autowire(
     registry: ServiceRegistry,
-    cls: Type,
-    iface: Any = Interface,
+    cls: Type[Any],
+    iface: Type[Any] = Interface,
     *,
-    context: Optional[Interface] = None,
-    name: Optional[Text] = "",
-    namespace: Optional[Dict[Text, Any]] = None
+    context: Optional[Type[Any]] = None,
+    name: Text = "",
+    cls_args: Optional[Iterable[Any]] = None,
+    cls_kwargs: Optional[Mapping[Text, Any]] = None,
+    namespace: Optional[Mapping[Text, Any]] = None,
+    lazy: bool = False
 ) -> None:
-    factory = factory_factory(cls, namespace)
+    factory = factory_factory(cls, cls_args, cls_kwargs, namespace, lazy)
     registry.register_factory(factory, iface, context=context, name=name)
 
 

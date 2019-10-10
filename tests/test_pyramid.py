@@ -1,5 +1,5 @@
 import pytest
-from autowired import AutowireTo
+from autowired import AutowireField
 from zope.interface import Interface
 
 try:
@@ -17,10 +17,7 @@ class IBar(Interface):
 
 
 class Bar:
-    foo = AutowireTo(IFoo)
-
-    def __init__(self, foo):
-        self.foo = foo
+    foo = AutowireField(IFoo)
 
 
 @pytest.mark.skipif(pyramid is None, reason="pyramid is not installed")
